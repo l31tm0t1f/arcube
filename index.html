@@ -48,6 +48,7 @@
         let controller;
         let reticle; // The marker to show where the object will be placed
         let hitTestSource = null;
+        let referenceSpace = null; // Stored reference space for hit-testing
         let hitTestSourceRequested = false;
 
         function init() {
@@ -71,8 +72,20 @@
             // Set output encoding for better colors (optional but good practice)
             renderer.outputEncoding = THREE.sRGBEncoding;
 
-            // 4. Add the WebXR AR Button (Requesting 'hit-test' feature is crucial for surface placement)
-            document.body.appendChild(ARButton.createButton(renderer, { requiredFeatures: ['hit-test'] }));
+            // 4. Add the WebXR AR Button 
+            // We use ARButton.createButton which handles session requests and error logging for us.
+            // The catch block logs session failure reasons for better debugging.
+            try {
+                const button = ARButton.createButton(renderer, { requiredFeatures: ['hit-test'] });
+                document.body.appendChild(button);
+            } catch (e) {
+                console.error("AR Button setup failed:", e);
+                const errorDiv = document.createElement('div');
+                errorDiv.innerText = "Error setting up AR. Ensure your device/browser supports WebXR.";
+                errorDiv.style.color = 'red';
+                document.body.appendChild(errorDiv);
+            }
+            
 
             // 5. Lighting
             const light = new THREE.HemisphereLight(0xffffff, 0xbbbbff, 1);
@@ -86,25 +99,25 @@
             // Don't add it to the scene yet, it's just a template.
 
             // 7. Reticle (The visual marker for placement)
+            // It uses a simple double-ring pattern to indicate position
             const reticleGeometry = new THREE.RingGeometry(0.08, 0.1, 32).rotateX(-Math.PI / 2);
             const reticleMaterial = new THREE.MeshBasicMaterial({ color: 0xffffff });
             reticle = new THREE.Mesh(reticleGeometry, reticleMaterial);
-            reticle.matrixAutoUpdate = false; // We will update the matrix manually based on hit-test
+            reticle.matrixAutoUpdate = false; 
             reticle.visible = false;
             scene.add(reticle);
 
             // 8. Controller and Event Listeners
             controller = renderer.xr.getController(0);
-            // Note: The controller is the tap event source in AR mode
             controller.addEventListener('select', onSelect); 
             scene.add(controller);
             
             // Setup session listeners
             renderer.xr.addEventListener('sessionstart', setupSession);
             renderer.xr.addEventListener('sessionend', () => {
-                // Clear hit test resources when session ends
                 hitTestSourceRequested = false;
                 hitTestSource = null;
+                referenceSpace = null;
                 reticle.visible = false;
             });
 
@@ -140,22 +153,24 @@
             const session = renderer.xr.getSession();
 
             if (session) {
-                session.requestReferenceSpace('viewer').then(referenceSpace => {
+                // FIX 1: Request the 'local' reference space. This provides a stable origin point
+                // which often works better than 'viewer' for initial surface finding.
+                session.requestReferenceSpace('local').then(space => {
+                    referenceSpace = space;
+                    
                     // Request a hit test source starting from the 'viewer' space
-                    session.requestHitTestSource({ space: referenceSpace }).then(source => {
+                    session.requestHitTestSource({ space: session.requestReferenceSpace('viewer') }).then(source => {
                         hitTestSource = source;
+                        hitTestSourceRequested = true;
+                        reticle.visible = true;
+                        console.log('AR Session Started. Hit testing active. Reference space: local');
                     }).catch(e => {
-                        console.error("Failed to request hit test source:", e);
+                        console.error("Failed to request hit test source. Hit-testing will not work:", e);
                     });
+
                 }).catch(e => {
-                    console.error("Failed to request viewer reference space:", e);
+                    console.error("Failed to request local reference space:", e);
                 });
-                
-                // Set flags to start hit testing in the animate loop
-                hitTestSourceRequested = true;
-                reticle.visible = true;
-                
-                console.log('AR Session Started. Hit testing active.');
             }
         }
 
@@ -166,22 +181,21 @@
         }
 
         function animate(timestamp, frame) {
-            // Check if we are inside a frame with valid data
-            if (frame) {
+            // Check if we are inside a frame with valid data AND we have reference space
+            if (frame && referenceSpace) {
+                
                 // Check if hit testing is set up and requested
                 if (hitTestSourceRequested === true && hitTestSource !== null) {
                     
-                    const referenceSpace = renderer.xr.getReferenceSpace();
-                    
-                    // CRITICAL SAFETY CHECK: Ensure we have both reference space and hit test source
-                    if (referenceSpace && hitTestSource) {
+                    try {
+                        // CRITICAL: Use the referenceSpace saved in the setupSession function
                         const hitTestResults = frame.getHitTestResults(hitTestSource);
 
                         if (hitTestResults.length > 0) {
                             // Hit test success
                             const hit = hitTestResults[0];
 
-                            // Get the transformation matrix from the hit result
+                            // Get the transformation matrix from the hit result based on our established reference space
                             const matrix = hit.getPose(referenceSpace).transform.matrix;
                             
                             // Position the reticle
@@ -192,11 +206,16 @@
                             // No surface found
                             reticle.visible = false;
                         }
-                    } else {
-                        // This case should be rare, but handles if referenceSpace or hitTestSource is lost
+                    } catch (e) {
+                        // Catching errors during hit-test processing, which can stop the animation loop
+                        console.error("Error during hit-test processing (potential cause of freezing):", e);
                         reticle.visible = false;
                     }
                 }
+            } else {
+                // If frame is null or referenceSpace is null, the app should fall back to standard desktop mode,
+                // but since we are in setAnimationLoop, this is the XR system's job.
+                // We keep rendering outside the frame block to allow desktop mode if session ends.
             }
             
             // Render the scene
