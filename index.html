@@ -95,7 +95,8 @@
 
             // 8. Controller and Event Listeners
             controller = renderer.xr.getController(0);
-            controller.addEventListener('select', onSelect); // Fired on screen tap (or controller trigger pull)
+            // Note: The controller is the tap event source in AR mode
+            controller.addEventListener('select', onSelect); 
             scene.add(controller);
             
             // Setup session listeners
@@ -104,6 +105,7 @@
                 // Clear hit test resources when session ends
                 hitTestSourceRequested = false;
                 hitTestSource = null;
+                reticle.visible = false;
             });
 
 
@@ -119,36 +121,41 @@
             if (reticle.visible) {
                 // Clone the template cube and place it at the reticle's position
                 const newCube = cubeTemplate.clone();
+                
+                // Use reticle's matrix to set the cube's position/orientation
                 reticle.matrix.decompose(newCube.position, newCube.quaternion, newCube.scale);
                 scene.add(newCube);
                 
                 // Add a little spin animation on placement
                 newCube.rotation.x = Math.random() * Math.PI * 2;
                 newCube.rotation.y = Math.random() * Math.PI * 2;
+                
+                // Log placement for debugging
+                console.log('Cube placed at:', newCube.position);
             }
         }
         
         // Function to set up AR session specific resources
         function setupSession() {
-            // Get the XR session and request a hit test source
             const session = renderer.xr.getSession();
 
             if (session) {
-                // Request a reference space (needed for AR positioning)
                 session.requestReferenceSpace('viewer').then(referenceSpace => {
+                    // Request a hit test source starting from the 'viewer' space
                     session.requestHitTestSource({ space: referenceSpace }).then(source => {
                         hitTestSource = source;
+                    }).catch(e => {
+                        console.error("Failed to request hit test source:", e);
                     });
+                }).catch(e => {
+                    console.error("Failed to request viewer reference space:", e);
                 });
                 
-                session.addEventListener('end', () => {
-                    hitTestSourceRequested = false;
-                    hitTestSource = null;
-                    reticle.visible = false;
-                });
-
+                // Set flags to start hit testing in the animate loop
                 hitTestSourceRequested = true;
                 reticle.visible = true;
+                
+                console.log('AR Session Started. Hit testing active.');
             }
         }
 
@@ -159,30 +166,39 @@
         }
 
         function animate(timestamp, frame) {
+            // Check if we are inside a frame with valid data
             if (frame) {
-                // Handle Hit Test results to position the reticle
-                if (hitTestSourceRequested === true) {
+                // Check if hit testing is set up and requested
+                if (hitTestSourceRequested === true && hitTestSource !== null) {
+                    
                     const referenceSpace = renderer.xr.getReferenceSpace();
-                    const hitTestResults = frame.getHitTestResults(hitTestSource);
+                    
+                    // CRITICAL SAFETY CHECK: Ensure we have both reference space and hit test source
+                    if (referenceSpace && hitTestSource) {
+                        const hitTestResults = frame.getHitTestResults(hitTestSource);
 
-                    if (hitTestResults.length > 0) {
-                        // We have a successful hit-test result
-                        const hit = hitTestResults[0];
+                        if (hitTestResults.length > 0) {
+                            // Hit test success
+                            const hit = hitTestResults[0];
 
-                        // Get the transformation matrix from the hit result
-                        const matrix = hit.getPose(referenceSpace).transform.matrix;
-                        
-                        // Set the reticle's position and orientation based on the hit
-                        reticle.matrix.copy(matrix);
-                        reticle.visible = true;
+                            // Get the transformation matrix from the hit result
+                            const matrix = hit.getPose(referenceSpace).transform.matrix;
+                            
+                            // Position the reticle
+                            reticle.matrix.copy(matrix);
+                            reticle.visible = true;
 
+                        } else {
+                            // No surface found
+                            reticle.visible = false;
+                        }
                     } else {
-                        // No surface found
+                        // This case should be rare, but handles if referenceSpace or hitTestSource is lost
                         reticle.visible = false;
                     }
                 }
             }
-
+            
             // Render the scene
             renderer.render(scene, camera);
         }
