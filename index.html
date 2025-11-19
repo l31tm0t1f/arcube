@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Three.js WebXR AR Cube Placement</title>
+    <!-- Load Tailwind CSS for simple styling -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #1f2937; }
+        /* Style for the AR Button, ensuring it sits nicely on the screen */
+        #ARButton {
+            position: absolute;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            padding: 10px 20px;
+            font-size: 1.2rem;
+            color: white;
+            background-color: #10b981; /* Green for AR */
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.2);
+            transition: background-color 0.3s;
+        }
+        #ARButton:hover {
+            background-color: #059669;
+        }
+        canvas {
+            display: block;
+        }
+    </style>
+</head>
+<body>
+    <script type="module">
+        // Using three.js r137 for better WebXR support
+        import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.137.0/build/three.module.js';
+        
+        // Import the ARButton helper instead of VRButton
+        import { ARButton } from 'https://cdn.jsdelivr.net/npm/three@0.137.0/examples/jsm/webxr/ARButton.js';
+
+        // --- Core Scene Setup Variables ---
+        let scene, camera, renderer;
+        let cubeTemplate; // The cube to be placed
+        
+        // --- AR Specific Variables ---
+        let controller;
+        let reticle; // The marker to show where the object will be placed
+        let hitTestSource = null;
+        let hitTestSourceRequested = false;
+
+        function init() {
+            // 1. Scene Setup
+            scene = new THREE.Scene();
+            
+            // 2. Camera Setup (The camera position will be managed by the AR headset/phone)
+            camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.01, 20);
+
+            // 3. Renderer Setup
+            renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true }); // Alpha is true for AR transparency
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(window.devicePixelRatio);
+            renderer.domElement.style.position = 'absolute';
+            renderer.domElement.style.top = '0';
+            document.body.appendChild(renderer.domElement);
+            
+            // Enable XR for the renderer
+            renderer.xr.enabled = true;
+            
+            // Set output encoding for better colors (optional but good practice)
+            renderer.outputEncoding = THREE.sRGBEncoding;
+
+            // 4. Add the WebXR AR Button (Requesting 'hit-test' feature is crucial for surface placement)
+            document.body.appendChild(ARButton.createButton(renderer, { requiredFeatures: ['hit-test'] }));
+
+            // 5. Lighting
+            const light = new THREE.HemisphereLight(0xffffff, 0xbbbbff, 1);
+            light.position.set(0.5, 1, 0.25);
+            scene.add(light);
+
+            // 6. Cube Template (The object we will clone and place)
+            const geometry = new THREE.BoxGeometry(0.2, 0.2, 0.2);
+            const material = new THREE.MeshPhongMaterial({ color: 0xffa500 });
+            cubeTemplate = new THREE.Mesh(geometry, material);
+            // Don't add it to the scene yet, it's just a template.
+
+            // 7. Reticle (The visual marker for placement)
+            const reticleGeometry = new THREE.RingGeometry(0.08, 0.1, 32).rotateX(-Math.PI / 2);
+            const reticleMaterial = new THREE.MeshBasicMaterial({ color: 0xffffff });
+            reticle = new THREE.Mesh(reticleGeometry, reticleMaterial);
+            reticle.matrixAutoUpdate = false; // We will update the matrix manually based on hit-test
+            reticle.visible = false;
+            scene.add(reticle);
+
+            // 8. Controller and Event Listeners
+            controller = renderer.xr.getController(0);
+            controller.addEventListener('select', onSelect); // Fired on screen tap (or controller trigger pull)
+            scene.add(controller);
+            
+            // Setup session listeners
+            renderer.xr.addEventListener('sessionstart', setupSession);
+            renderer.xr.addEventListener('sessionend', () => {
+                // Clear hit test resources when session ends
+                hitTestSourceRequested = false;
+                hitTestSource = null;
+            });
+
+
+            // 9. Handle window resizing
+            window.addEventListener('resize', onWindowResize, false);
+
+            // Start the animation loop
+            renderer.setAnimationLoop(animate);
+        }
+        
+        // Function to handle the 'select' event (user tap)
+        function onSelect() {
+            if (reticle.visible) {
+                // Clone the template cube and place it at the reticle's position
+                const newCube = cubeTemplate.clone();
+                reticle.matrix.decompose(newCube.position, newCube.quaternion, newCube.scale);
+                scene.add(newCube);
+                
+                // Add a little spin animation on placement
+                newCube.rotation.x = Math.random() * Math.PI * 2;
+                newCube.rotation.y = Math.random() * Math.PI * 2;
+            }
+        }
+        
+        // Function to set up AR session specific resources
+        function setupSession() {
+            // Get the XR session and request a hit test source
+            const session = renderer.xr.getSession();
+
+            if (session) {
+                // Request a reference space (needed for AR positioning)
+                session.requestReferenceSpace('viewer').then(referenceSpace => {
+                    session.requestHitTestSource({ space: referenceSpace }).then(source => {
+                        hitTestSource = source;
+                    });
+                });
+                
+                session.addEventListener('end', () => {
+                    hitTestSourceRequested = false;
+                    hitTestSource = null;
+                    reticle.visible = false;
+                });
+
+                hitTestSourceRequested = true;
+                reticle.visible = true;
+            }
+        }
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        function animate(timestamp, frame) {
+            if (frame) {
+                // Handle Hit Test results to position the reticle
+                if (hitTestSourceRequested === true) {
+                    const referenceSpace = renderer.xr.getReferenceSpace();
+                    const hitTestResults = frame.getHitTestResults(hitTestSource);
+
+                    if (hitTestResults.length > 0) {
+                        // We have a successful hit-test result
+                        const hit = hitTestResults[0];
+
+                        // Get the transformation matrix from the hit result
+                        const matrix = hit.getPose(referenceSpace).transform.matrix;
+                        
+                        // Set the reticle's position and orientation based on the hit
+                        reticle.matrix.copy(matrix);
+                        reticle.visible = true;
+
+                    } else {
+                        // No surface found
+                        reticle.visible = false;
+                    }
+                }
+            }
+
+            // Render the scene
+            renderer.render(scene, camera);
+        }
+
+        // Initialize the app when the window loads
+        window.onload = init;
+
+    </script>
+</body>
+</html>
